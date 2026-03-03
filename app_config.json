@@ -1,0 +1,10 @@
+{
+  "api_url": "https://f3c5z1l8l5o9ffa4.aistudio-app.com/layout-parsing",
+  "api_token": "",
+  "request_timeout_seconds": 300,
+  "nvidia_api_url": "https://integrate.api.nvidia.com/v1/chat/completions",
+  "nvidia_api_key": "",
+  "nvidia_model": "openai/gpt-oss-120b",
+  "max_requests_per_minute": 35,
+  "translation_concurrency": 5
+}
