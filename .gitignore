@@ -4,3 +4,8 @@ __pycache__
 
 *.spec
 *.pyc
+*.log
+
+.venv/
+app_config.json
+app_config_my.json

@@ -7,11 +7,9 @@ Tkinter desktop app for:
 - translating Markdown into Simplified Chinese with the NVIDIA API
 - saving and reusing local API settings
 
-All implementation for this app lives under [`python/`](/d:/0-research/code/pdf-translator/python).
-
 ## Run
 
-From [`python/`](/d:/0-research/code/pdf-translator/python):
+From the repository root:
 
 ```bash
 uv sync
@@ -143,6 +141,43 @@ uv run pyinstaller --noconfirm --clean --windowed --onefile --name pdf-translato
 Build output:
 
 - `dist/pdf-translator.exe`
+
+## Publish A Release
+
+This repository can publish a Windows EXE to GitHub Releases automatically.
+
+### One-time setup
+
+1. Push this repository to GitHub.
+2. Make sure the default branch is `main`.
+3. Keep the workflow file under `.github/workflows/release.yml`.
+
+### Release flow
+
+Create and push a version tag:
+
+```bash
+git add .
+git commit -m "Release v0.1.0"
+git tag v0.1.0
+git push origin main
+git push origin v0.1.0
+```
+
+After the tag is pushed, GitHub Actions will:
+
+- build `pdf-translator.exe` on Windows
+- rename it to `pdf-translator-v0.1.0-windows-x64.exe`
+- create or update the matching GitHub Release
+- upload the EXE as a Release asset
+
+Tag format:
+
+- `v0.1.0`
+- `v0.2.3`
+- `v1.0.0`
+
+If you want to publish manually without GitHub Actions, build locally and upload `dist/pdf-translator.exe` in the GitHub Release page.
 
 ## Current Limitations
 
