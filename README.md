@@ -7,6 +7,12 @@ Tkinter desktop app for:
 - translating Markdown into Simplified Chinese with the NVIDIA API
 - saving and reusing local API settings
 
+## Screenshots
+
+### Main Window
+
+![Main Window](imgs/main%20page.png)
+
 ## Run
 
 From the repository root:
@@ -75,6 +81,10 @@ Extra behavior:
 - secret fields support `Show` / `Hide`
 - NVIDIA model list can be refreshed from official sources
 - settings are persisted locally
+
+### Settings Window
+
+![Settings Window](imgs/settings.png)
 
 Saved settings are stored in:
 
