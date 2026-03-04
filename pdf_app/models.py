@@ -21,6 +21,8 @@ class TimingStats:
 class ConversionResult:
     output_dir: Path
     markdown_path: Path
+    html_path: Path | None
     translated_markdown_path: Path | None
+    translated_html_path: Path | None
     stats: ConversionStats
     timings: TimingStats

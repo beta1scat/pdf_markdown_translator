@@ -172,7 +172,7 @@ class PdfToMarkdownApp:
         window = tk.Toplevel(self.root)
         window.title("Settings")
         window.geometry("720x360")
-        window.minsize(660, 320)
+        window.resizable(False, False)
         window.transient(self.root)
         window.grab_set()
         self.settings_window = window
@@ -511,7 +511,9 @@ class PdfToMarkdownApp:
             0,
             self._on_success,
             result.markdown_path,
+            result.html_path,
             result.translated_markdown_path,
+            result.translated_html_path,
             result.output_dir,
             result.stats.page_count,
             result.stats.image_count,
@@ -523,7 +525,9 @@ class PdfToMarkdownApp:
     def _on_success(
         self,
         markdown_path: Path,
+        html_path: Path | None,
         translated_markdown_path: Path | None,
+        translated_html_path: Path | None,
         output_dir: Path,
         page_count: int,
         image_count: int,
@@ -534,8 +538,12 @@ class PdfToMarkdownApp:
         self.is_running = False
         self.status_var.set("Completed.")
         self._append_log(f"Source Markdown: {markdown_path}")
+        if html_path is not None:
+            self._append_log(f"Source HTML saved to: {html_path}")
         if translated_markdown_path is not None:
             self._append_log(f"Translated Markdown saved to: {translated_markdown_path}")
+        if translated_html_path is not None:
+            self._append_log(f"Translated HTML saved to: {translated_html_path}")
         self._append_log(f"Output folder: {output_dir}")
         self._append_log(f"Pages: {page_count}, Images: {image_count}")
         self._append_log(f"Conversion time: {conversion_seconds:.2f}s")
@@ -543,11 +551,15 @@ class PdfToMarkdownApp:
         self._append_log(f"Total time: {total_seconds:.2f}s")
 
         translated_label = translated_markdown_path or "Not generated"
+        translated_html_label = translated_html_path or "Not generated"
+        html_label = html_path or "Not generated"
         messagebox.showinfo(
             "Completed",
             (
                 f"Markdown saved to:\n{markdown_path}\n\n"
+                f"HTML saved to:\n{html_label}\n\n"
                 f"Translated Markdown:\n{translated_label}\n\n"
+                f"Translated HTML:\n{translated_html_label}\n\n"
                 f"Pages: {page_count}\nImages: {image_count}\n"
                 f"Conversion time: {conversion_seconds:.2f}s\n"
                 f"Translation time: {translation_seconds:.2f}s\n"
