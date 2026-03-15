@@ -84,7 +84,9 @@ def call_layout_api(file_path: Path, config: AppConfig) -> dict:
     data = response.json()
     result = data.get("result")
     if not isinstance(result, dict):
-        raise PdfConversionError("Layout API response does not contain a valid result payload.")
+        raise PdfConversionError(
+            "Layout API response does not contain a valid result payload."
+        )
     return result
 
 
@@ -98,19 +100,74 @@ def merge_markdown(result: dict) -> str:
     return center_images_markdown("\n\n".join(parts))
 
 
+def merge_trailing_hyphenated_words(markdown_text: str) -> str:
+    newline = "\r\n" if "\r\n" in markdown_text else "\n"
+    lines = markdown_text.splitlines()
+    if len(lines) < 2:
+        return markdown_text
+
+    merged_lines = lines[:]
+
+    for index, line in enumerate(merged_lines):
+        hyphen_match = re.search(r"([A-Za-z]{2,})-[ \t]*$", line)
+        if not hyphen_match:
+            continue
+
+        next_index = index + 1
+        while next_index < len(merged_lines) and _is_dehyphenation_bridge_line(
+            merged_lines[next_index].strip()
+        ):
+            next_index += 1
+
+        if next_index >= len(merged_lines):
+            continue
+
+        continuation_match = re.match(
+            r"^(\s*)([A-Za-z]{2,})(\b.*)$", merged_lines[next_index]
+        )
+        if not continuation_match:
+            continue
+
+        merged_lines[index] = (
+            f"{line[: hyphen_match.start(1)]}{hyphen_match.group(1)}{continuation_match.group(2)}"
+        )
+        remainder = continuation_match.group(3)
+        merged_lines[next_index] = f"{continuation_match.group(1)}{remainder.lstrip()}"
+
+    trailing_newline = newline if markdown_text.endswith(("\n", "\r")) else ""
+    return newline.join(merged_lines) + trailing_newline
+
+
+def _is_dehyphenation_bridge_line(stripped_line: str) -> bool:
+    if not stripped_line:
+        return True
+    lowered = stripped_line.lower()
+    if stripped_line.startswith("!["):
+        return True
+    if lowered.startswith("<img"):
+        return True
+    if lowered.startswith("<figure") or lowered.startswith("</figure"):
+        return True
+    if lowered.startswith("<div") and ("<img" in lowered or "figure" in lowered):
+        return True
+    if re.match(r"^(figure|fig\.)\s*\d+\b", stripped_line, flags=re.IGNORECASE):
+        return True
+    return False
+
+
 def center_images_markdown(markdown_text: str) -> str:
     centered = re.sub(
-        r'(?im)^[ \t]*<div\b[^>]*>\s*(<img\b[^>]*?/?>)\s*</div>[ \t]*$',
+        r"(?im)^[ \t]*<div\b[^>]*>\s*(<img\b[^>]*?/?>)\s*</div>[ \t]*$",
         lambda match: f'<div align="center">{match.group(1)}</div>',
         markdown_text,
     )
     centered = re.sub(
-        r'(?im)^[ \t]*(<img\b[^>]*?/?>)[ \t]*$',
+        r"(?im)^[ \t]*(<img\b[^>]*?/?>)[ \t]*$",
         lambda match: f'<div align="center">{match.group(1)}</div>',
         centered,
     )
     centered = re.sub(
-        r'(?im)^[ \t]*!\[([^\]]*)\]\(([^)]+)\)[ \t]*$',
+        r"(?im)^[ \t]*!\[([^\]]*)\]\(([^)]+)\)[ \t]*$",
         lambda match: (
             f'<div align="center"><img src="{match.group(2)}" alt="{html.escape(match.group(1), quote=True)}" /></div>'
         ),
@@ -198,7 +255,7 @@ def _render_markdown_html(markdown_text: str, title: str) -> str:
         "    blockquote { margin: 16px 0; padding: 12px 16px; border-left: 4px solid #94a3b8; background: #f8fafc; }\n"
         "    .math-block { overflow-x: auto; margin: 16px 0; }\n"
         "  </style>\n"
-        '  <script>\n'
+        "  <script>\n"
         "    window.MathJax = {\n"
         "      tex: {\n"
         "        inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],\n"
@@ -295,11 +352,15 @@ def convert_pdf_to_markdown(
         phase_callback("converting")
     conversion_start = time.perf_counter()
     result = call_layout_api(source_path, config)
-    merged_markdown = merge_markdown(result)
+    merged_markdown = merge_trailing_hyphenated_words(merge_markdown(result))
     markdown_path = document_output_dir / f"{source_path.stem}_full.md"
     markdown_path.write_text(merged_markdown, encoding="utf-8")
-    html_path = _write_markdown_html(markdown_path, merged_markdown, f"{source_path.stem} Markdown")
-    image_count = save_images(result, document_output_dir, config.request_timeout_seconds)
+    html_path = _write_markdown_html(
+        markdown_path, merged_markdown, f"{source_path.stem} Markdown"
+    )
+    image_count = save_images(
+        result, document_output_dir, config.request_timeout_seconds
+    )
     conversion_seconds = time.perf_counter() - conversion_start
 
     translated_markdown_path: Path | None = None
@@ -308,10 +369,14 @@ def convert_pdf_to_markdown(
         if phase_callback is not None:
             phase_callback("translating")
         translation_start = time.perf_counter()
-        translator = NvidiaMarkdownTranslator(config, progress_callback=progress_callback)
+        translator = NvidiaMarkdownTranslator(
+            config, progress_callback=progress_callback
+        )
         translated_markdown = translator.translate_markdown(merged_markdown)
         translated_markdown = center_images_markdown(translated_markdown)
-        translated_markdown_path = document_output_dir / f"{source_path.stem}_full_zh.md"
+        translated_markdown_path = (
+            document_output_dir / f"{source_path.stem}_full_zh.md"
+        )
         translated_markdown_path.write_text(translated_markdown, encoding="utf-8")
         translated_html_path = _write_markdown_html(
             translated_markdown_path,
@@ -352,14 +417,20 @@ def translate_markdown_file(
     if not source_path.is_file():
         raise MarkdownTranslationError(f"Markdown file does not exist: {source_path}")
     if source_path.suffix.lower() not in {".md", ".markdown", ".txt"}:
-        raise MarkdownTranslationError(f"Only Markdown or text files are supported: {source_path}")
+        raise MarkdownTranslationError(
+            f"Only Markdown or text files are supported: {source_path}"
+        )
     if not config.nvidia_api_key:
         raise MarkdownTranslationError("NVIDIA_API_KEY is not configured.")
 
     base_output_path.mkdir(parents=True, exist_ok=True)
 
-    original_markdown = center_images_markdown(source_path.read_text(encoding="utf-8"))
-    source_html_path = _write_markdown_html(source_path, original_markdown, f"{source_path.stem} Markdown")
+    original_markdown = merge_trailing_hyphenated_words(
+        center_images_markdown(source_path.read_text(encoding="utf-8"))
+    )
+    source_html_path = _write_markdown_html(
+        source_path, original_markdown, f"{source_path.stem} Markdown"
+    )
     translator = NvidiaMarkdownTranslator(config, progress_callback=progress_callback)
     try:
         if phase_callback is not None:
