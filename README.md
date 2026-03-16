@@ -145,12 +145,18 @@ If present, these can be used as defaults before local config is saved:
 Use PyInstaller inside the `uv` environment:
 
 ```bash
-uv run pyinstaller --noconfirm --clean --windowed --onefile --name pdf-translator app.py
+uv run pyinstaller --noconfirm --clean pdf-translator.spec
 ```
 
 Build output:
 
 - `dist/pdf-translator.exe`
+
+Build notes:
+
+- the EXE version resource is generated from `pyproject.toml`
+- the bundled app also reads the same `pyproject.toml` version at runtime
+- update only `pyproject.toml` when you want to bump the app version
 
 ## Publish A Release
 
