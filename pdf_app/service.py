@@ -4,6 +4,7 @@ import base64
 import html
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -13,6 +14,7 @@ import requests
 from .config import AppConfig
 from .markdown_translator import NvidiaMarkdownTranslator, TranslationError
 from .models import ConversionResult, ConversionStats, TimingStats
+from .paths import get_app_base_dir
 
 
 class PdfConversionError(RuntimeError):
@@ -25,6 +27,22 @@ class MarkdownTranslationError(RuntimeError):
 
 PhaseCallback = Callable[[str], None]
 ProgressCallback = Callable[[int, int], None]
+LAYOUT_API_MAX_ATTEMPTS = 3
+LAYOUT_API_RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+LAYOUT_API_CONNECT_TIMEOUT_CAP_SECONDS = 20
+IMAGE_DOWNLOAD_MAX_ATTEMPTS = 4
+IMAGE_DOWNLOAD_BASE_DELAY_SECONDS = 1.0
+IMAGE_DOWNLOAD_RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+
+
+def _append_runtime_log(message: str) -> None:
+    log_path = get_app_base_dir() / "app.log"
+    timestamped = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+    try:
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"{timestamped}\n")
+    except OSError:
+        pass
 
 
 def _encode_pdf(file_path: Path) -> str:
@@ -69,25 +87,76 @@ def call_layout_api(file_path: Path, config: AppConfig) -> dict:
         "restructurePages": True,
     }
     payload = {**required_payload, **optional_payload}
-
-    response = requests.post(
-        config.api_url,
-        json=payload,
-        headers=headers,
-        timeout=config.request_timeout_seconds,
+    connect_timeout = max(
+        5, min(config.request_timeout_seconds, LAYOUT_API_CONNECT_TIMEOUT_CAP_SECONDS)
     )
-    if response.status_code != 200:
+    last_error: str | None = None
+
+    for attempt in range(1, LAYOUT_API_MAX_ATTEMPTS + 1):
+        try:
+            response = requests.post(
+                config.api_url,
+                json=payload,
+                headers=headers,
+                timeout=(connect_timeout, config.request_timeout_seconds),
+            )
+        except requests.exceptions.ConnectTimeout as exc:
+            last_error = (
+                "Unable to connect to the Layout API before the connection timeout expired. "
+                "The service may be sleeping, overloaded, or temporarily unreachable. "
+                f"Attempt {attempt}/{LAYOUT_API_MAX_ATTEMPTS}."
+            )
+            if attempt < LAYOUT_API_MAX_ATTEMPTS:
+                time.sleep(attempt * 2)
+                continue
+            raise PdfConversionError(last_error) from exc
+        except requests.exceptions.ReadTimeout as exc:
+            last_error = (
+                "The Layout API accepted the connection but did not finish responding before the timeout expired. "
+                "Try increasing the timeout or retrying later. "
+                f"Attempt {attempt}/{LAYOUT_API_MAX_ATTEMPTS}."
+            )
+            if attempt < LAYOUT_API_MAX_ATTEMPTS:
+                time.sleep(attempt * 2)
+                continue
+            raise PdfConversionError(last_error) from exc
+        except requests.exceptions.ConnectionError as exc:
+            last_error = (
+                "Unable to reach the Layout API. Please check the API URL, your network connection, proxy/VPN settings, "
+                f"and whether the remote service is online. Attempt {attempt}/{LAYOUT_API_MAX_ATTEMPTS}."
+            )
+            if attempt < LAYOUT_API_MAX_ATTEMPTS:
+                time.sleep(attempt * 2)
+                continue
+            raise PdfConversionError(last_error) from exc
+        except requests.exceptions.RequestException as exc:
+            raise PdfConversionError(f"Layout API request failed: {exc}") from exc
+
+        if response.status_code == 200:
+            data = response.json()
+            result = data.get("result")
+            if not isinstance(result, dict):
+                raise PdfConversionError(
+                    "Layout API response does not contain a valid result payload."
+                )
+            return result
+
+        if (
+            response.status_code in LAYOUT_API_RETRYABLE_STATUS_CODES
+            and attempt < LAYOUT_API_MAX_ATTEMPTS
+        ):
+            last_error = (
+                f"Layout API request failed with status {response.status_code}. "
+                f"Attempt {attempt}/{LAYOUT_API_MAX_ATTEMPTS}."
+            )
+            time.sleep(attempt * 2)
+            continue
+
         raise PdfConversionError(
             f"Layout API request failed with status {response.status_code}: {response.text[:400]}"
         )
 
-    data = response.json()
-    result = data.get("result")
-    if not isinstance(result, dict):
-        raise PdfConversionError(
-            "Layout API response does not contain a valid result payload."
-        )
-    return result
+    raise PdfConversionError(last_error or "Layout API request failed.")
 
 
 def merge_markdown(result: dict) -> str:
@@ -298,6 +367,53 @@ def _resolve_output_image_path(output_dir: Path, relative_path: str) -> Path:
     return candidate
 
 
+def _download_image_with_retry(image_url: str, timeout_seconds: int) -> bytes:
+    last_error: Exception | None = None
+
+    for attempt in range(1, IMAGE_DOWNLOAD_MAX_ATTEMPTS + 1):
+        try:
+            response = requests.get(image_url, timeout=timeout_seconds)
+            if response.status_code in IMAGE_DOWNLOAD_RETRYABLE_STATUS_CODES:
+                raise requests.exceptions.HTTPError(
+                    f"HTTP {response.status_code} for image download",
+                    response=response,
+                )
+            response.raise_for_status()
+            return response.content
+        except requests.exceptions.HTTPError as exc:
+            response = exc.response
+            status_code = response.status_code if response is not None else None
+            if status_code not in IMAGE_DOWNLOAD_RETRYABLE_STATUS_CODES:
+                raise PdfConversionError(
+                    "Image download failed with a non-retryable status: "
+                    f"{status_code} for {image_url}"
+                ) from exc
+            last_error = exc
+            if attempt >= IMAGE_DOWNLOAD_MAX_ATTEMPTS:
+                break
+            delay_seconds = IMAGE_DOWNLOAD_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+            _append_runtime_log(
+                f"Retrying image download after HTTP {status_code} "
+                f"(attempt {attempt + 1}/{IMAGE_DOWNLOAD_MAX_ATTEMPTS}, wait {delay_seconds:.1f}s): {image_url}"
+            )
+            time.sleep(delay_seconds)
+        except requests.exceptions.RequestException as exc:
+            last_error = exc
+            if attempt >= IMAGE_DOWNLOAD_MAX_ATTEMPTS:
+                break
+            delay_seconds = IMAGE_DOWNLOAD_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+            _append_runtime_log(
+                f"Retrying image download after {type(exc).__name__} "
+                f"(attempt {attempt + 1}/{IMAGE_DOWNLOAD_MAX_ATTEMPTS}, wait {delay_seconds:.1f}s): {image_url}"
+            )
+            time.sleep(delay_seconds)
+
+    raise PdfConversionError(
+        "Failed to download image from the Layout API after multiple retries: "
+        f"{image_url}. Last error: {last_error}"
+    ) from last_error
+
+
 def save_images(result: dict, output_dir: Path, timeout_seconds: int) -> int:
     image_count = 0
     layout_output_dir = output_dir / "layout"
@@ -307,9 +423,9 @@ def save_images(result: dict, output_dir: Path, timeout_seconds: int) -> int:
         for relative_path, image_url in images.items():
             image_path = _resolve_output_image_path(output_dir, str(relative_path))
             image_path.parent.mkdir(parents=True, exist_ok=True)
-            image_response = requests.get(image_url, timeout=timeout_seconds)
-            image_response.raise_for_status()
-            image_path.write_bytes(image_response.content)
+            image_path.write_bytes(
+                _download_image_with_retry(str(image_url), timeout_seconds)
+            )
             image_count += 1
 
         output_images = page.get("outputImages", {})
@@ -317,9 +433,9 @@ def save_images(result: dict, output_dir: Path, timeout_seconds: int) -> int:
             safe_name = str(image_name).replace("\\", "_").replace("/", "_")
             layout_output_dir.mkdir(parents=True, exist_ok=True)
             image_path = layout_output_dir / f"{safe_name}_{page_index}.jpg"
-            image_response = requests.get(image_url, timeout=timeout_seconds)
-            image_response.raise_for_status()
-            image_path.write_bytes(image_response.content)
+            image_path.write_bytes(
+                _download_image_with_retry(str(image_url), timeout_seconds)
+            )
             image_count += 1
     return image_count
 

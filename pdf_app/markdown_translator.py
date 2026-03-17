@@ -48,7 +48,10 @@ class RateLimiter:
         while True:
             with self._lock:
                 now = time.monotonic()
-                while self.request_times and now - self.request_times[0] >= self.period_seconds:
+                while (
+                    self.request_times
+                    and now - self.request_times[0] >= self.period_seconds
+                ):
                     self.request_times.popleft()
 
                 if len(self.request_times) < self.max_requests:
@@ -157,8 +160,10 @@ class NvidiaMarkdownTranslator:
 
     def _call_nvidia_api_with_system_prompt(self, text: str, system_prompt: str) -> str:
         self.rate_limiter.wait_for_slot()
-        leading_whitespace = re.match(r"^\s*", text).group(0)
-        trailing_whitespace = re.search(r"\s*$", text).group(0)
+        leading_match = re.match(r"^\s*", text)
+        trailing_match = re.search(r"\s*$", text)
+        leading_whitespace = leading_match.group(0) if leading_match else ""
+        trailing_whitespace = trailing_match.group(0) if trailing_match else ""
         headers = {
             "Authorization": f"Bearer {self.config.nvidia_api_key}",
             "Accept": "application/json",
@@ -203,14 +208,20 @@ class NvidiaMarkdownTranslator:
             )
         normalized_content = html.unescape(content)
         if leading_whitespace and not normalized_content.startswith(leading_whitespace):
-            normalized_content = leading_whitespace + normalized_content.lstrip(" \t\r\n")
+            normalized_content = leading_whitespace + normalized_content.lstrip(
+                " \t\r\n"
+            )
         if trailing_whitespace and not normalized_content.endswith(trailing_whitespace):
-            normalized_content = normalized_content.rstrip(" \t\r\n") + trailing_whitespace
+            normalized_content = (
+                normalized_content.rstrip(" \t\r\n") + trailing_whitespace
+            )
         return normalized_content
 
     def _extract_content(self, data: object) -> str:
         if not isinstance(data, dict):
-            raise TranslationError(f"Unexpected NVIDIA API response type: {type(data).__name__}")
+            raise TranslationError(
+                f"Unexpected NVIDIA API response type: {type(data).__name__}"
+            )
 
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
@@ -232,6 +243,12 @@ class NvidiaMarkdownTranslator:
             normalized = self._normalize_content(content)
             if normalized is not None:
                 return normalized
+            if self._has_reasoning_without_content(message):
+                raise TranslationError(
+                    "NVIDIA API returned reasoning text but no final content. "
+                    "This commonly happens with heading-only follow-up requests on some models. "
+                    f"Response preview: {self._preview_response(data)}"
+                )
 
         text = first_choice.get("text")
         if isinstance(text, str) and text.strip():
@@ -267,6 +284,15 @@ class NvidiaMarkdownTranslator:
             return joined if joined else None
 
         return None
+
+    def _has_reasoning_without_content(self, message: dict[str, object]) -> bool:
+        reasoning = message.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return True
+        reasoning_content = message.get("reasoning_content")
+        if isinstance(reasoning_content, str) and reasoning_content.strip():
+            return True
+        return False
 
     def _preview_response(self, data: object, limit: int = 800) -> str:
         try:
@@ -344,7 +370,9 @@ class NvidiaMarkdownTranslator:
             protected_text,
         )
 
-        protected_text = self._protect_reference_sections(protected_text, make_placeholder)
+        protected_text = self._protect_reference_sections(
+            protected_text, make_placeholder
+        )
 
         processed_lines: list[str] = []
         for line in protected_text.splitlines(keepends=True):
@@ -396,7 +424,9 @@ class NvidiaMarkdownTranslator:
             )
             processed_lines.append(current + line_ending)
 
-        return ProtectedMarkdown(text="".join(processed_lines), placeholders=placeholders)
+        return ProtectedMarkdown(
+            text="".join(processed_lines), placeholders=placeholders
+        )
 
     def _protect_reference_sections(
         self,
@@ -409,18 +439,13 @@ class NvidiaMarkdownTranslator:
 
         protected_lines: list[str] = []
         inside_references = False
-        reference_heading_level: int | None = None
 
         for line in lines:
             stripped = line.strip()
             heading_level = self._get_heading_level(stripped)
 
-            if inside_references:
-                if heading_level is not None and reference_heading_level is not None and heading_level <= reference_heading_level:
-                    inside_references = False
-                    reference_heading_level = None
-                elif heading_level is not None and reference_heading_level is None:
-                    inside_references = False
+            if inside_references and heading_level is not None:
+                inside_references = False
 
             if (
                 not inside_references
@@ -428,7 +453,6 @@ class NvidiaMarkdownTranslator:
                 and self._is_reference_heading(stripped)
             ):
                 inside_references = True
-                reference_heading_level = heading_level
 
             if inside_references:
                 protected_lines.append(make_placeholder("REFERENCES", line))
@@ -474,7 +498,9 @@ class NvidiaMarkdownTranslator:
     def _normalize_div_blocks(self, text: str) -> str:
         # Layout OCR often wraps normal paragraphs in div containers.
         unwrapped = text
-        div_block_pattern = re.compile(r"<div\b[^>]*>([\s\S]*?)</div>", flags=re.IGNORECASE)
+        div_block_pattern = re.compile(
+            r"<div\b[^>]*>([\s\S]*?)</div>", flags=re.IGNORECASE
+        )
         while True:
             updated = div_block_pattern.sub(lambda match: match.group(1), unwrapped)
             if updated == unwrapped:
@@ -542,14 +568,17 @@ class NvidiaMarkdownTranslator:
         return "".join(translated_lines)
 
     def _translate_heading_text(self, heading_text: str) -> str:
-        translated = self._call_nvidia_api_with_system_prompt(
-            heading_text,
-            (
-                "Translate the heading text into Simplified Chinese. "
-                "Keep numbering, punctuation, abbreviations, and inline Markdown syntax intact. "
-                "Return only the translated heading text."
-            ),
-        )
+        try:
+            translated = self._call_nvidia_api_with_system_prompt(
+                heading_text,
+                (
+                    "Translate the heading text into Simplified Chinese. "
+                    "Keep numbering, punctuation, abbreviations, and inline Markdown syntax intact. "
+                    "Return only the translated heading text."
+                ),
+            )
+        except TranslationError:
+            return heading_text
         return translated.strip() or heading_text
 
     def _should_skip_translation(self, text: str) -> bool:
@@ -562,6 +591,8 @@ class NvidiaMarkdownTranslator:
             return True
         if not re.search(r"[A-Za-z]", text):
             return True
-        if re.fullmatch(r"(?:\s*" + PLACEHOLDER_SPLIT_REGEX.pattern + r"\s*)+", stripped):
+        if re.fullmatch(
+            r"(?:\s*" + PLACEHOLDER_SPLIT_REGEX.pattern + r"\s*)+", stripped
+        ):
             return True
         return False
