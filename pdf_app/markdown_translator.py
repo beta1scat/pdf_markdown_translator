@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 import html
 import json
 import re
@@ -7,12 +8,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from threading import Lock
 from typing import Callable
 
 import requests
 
 from .config import AppConfig
+from .paths import get_app_base_dir
 
 
 class TranslationError(RuntimeError):
@@ -20,6 +23,9 @@ class TranslationError(RuntimeError):
 
 
 CHUNK_TARGET_LIMIT = 5000
+NVIDIA_API_MAX_ATTEMPTS = 4
+NVIDIA_API_BASE_DELAY_SECONDS = 1.0
+NVIDIA_API_RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 ProgressCallback = Callable[[int, int], None]
 
 
@@ -35,6 +41,16 @@ PLACEHOLDER_TEST_REGEX = re.compile(
 class ProtectedMarkdown:
     text: str
     placeholders: dict[str, str]
+
+
+def _append_runtime_log(message: str) -> None:
+    log_path = get_app_base_dir() / "app.log"
+    timestamped = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+    try:
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"{timestamped}\n")
+    except OSError:
+        pass
 
 
 class RateLimiter:
@@ -94,6 +110,20 @@ class NvidiaMarkdownTranslator:
                 update_progress(len(chunk))
                 return index, chunk
             translated = self._call_nvidia_api(chunk)
+            if self._should_retry_for_untranslated_output(chunk, translated):
+                _append_runtime_log(
+                    f"Retrying untranslated-looking translation chunk {index + 1}/{len(chunks)}"
+                )
+                translated = self._call_nvidia_api_with_system_prompt(
+                    chunk,
+                    (
+                        "Translate all natural-language prose in the user's Markdown into Simplified Chinese. "
+                        "Do not leave full English sentences or paragraphs unchanged unless they are code, URLs, placeholders, or proper names that must remain in English. "
+                        "Preserve Markdown syntax, placeholders, citations, formulas, indentation, paragraph breaks, and line structure exactly. "
+                        "Keep model names, paper names, dataset names, author names, and bracketed references intact when appropriate, but translate the surrounding prose. "
+                        "Return only the translated Markdown content."
+                    ),
+                )
             update_progress(len(chunk))
             return index, translated
 
@@ -159,7 +189,6 @@ class NvidiaMarkdownTranslator:
         )
 
     def _call_nvidia_api_with_system_prompt(self, text: str, system_prompt: str) -> str:
-        self.rate_limiter.wait_for_slot()
         leading_match = re.match(r"^\s*", text)
         trailing_match = re.search(r"\s*$", text)
         leading_whitespace = leading_match.group(0) if leading_match else ""
@@ -187,35 +216,88 @@ class NvidiaMarkdownTranslator:
         }
         if self.config.nvidia_model.startswith("openai/gpt-oss-"):
             payload["reasoning_effort"] = "low"
-        response = requests.post(
-            self.config.nvidia_api_url,
-            headers=headers,
-            json=payload,
-            timeout=self.config.request_timeout_seconds,
-        )
-        if response.status_code != 200:
-            raise TranslationError(
-                f"NVIDIA API request failed with status {response.status_code}: {response.text[:400]}"
-            )
+        last_error: Exception | None = None
 
-        data = response.json()
-        content = self._extract_content(data)
+        for attempt in range(1, NVIDIA_API_MAX_ATTEMPTS + 1):
+            try:
+                self.rate_limiter.wait_for_slot()
+                response = requests.post(
+                    self.config.nvidia_api_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.config.request_timeout_seconds,
+                )
+                if response.status_code in NVIDIA_API_RETRYABLE_STATUS_CODES:
+                    raise requests.exceptions.HTTPError(
+                        f"HTTP {response.status_code} for NVIDIA translation request",
+                        response=response,
+                    )
+                if response.status_code != 200:
+                    raise TranslationError(
+                        f"NVIDIA API request failed with status {response.status_code}: {response.text[:400]}"
+                    )
 
-        if not isinstance(content, str) or not content.strip():
-            raise TranslationError(
-                "NVIDIA API returned empty translated content. "
-                f"Response preview: {self._preview_response(data)}"
-            )
-        normalized_content = html.unescape(content)
-        if leading_whitespace and not normalized_content.startswith(leading_whitespace):
-            normalized_content = leading_whitespace + normalized_content.lstrip(
-                " \t\r\n"
-            )
-        if trailing_whitespace and not normalized_content.endswith(trailing_whitespace):
-            normalized_content = (
-                normalized_content.rstrip(" \t\r\n") + trailing_whitespace
-            )
-        return normalized_content
+                data = response.json()
+                content = self._extract_content(data)
+
+                if not isinstance(content, str) or not content.strip():
+                    raise TranslationError(
+                        "NVIDIA API returned empty translated content. "
+                        f"Response preview: {self._preview_response(data)}"
+                    )
+                normalized_content = html.unescape(content)
+                if leading_whitespace and not normalized_content.startswith(
+                    leading_whitespace
+                ):
+                    normalized_content = leading_whitespace + normalized_content.lstrip(
+                        " \t\r\n"
+                    )
+                if trailing_whitespace and not normalized_content.endswith(
+                    trailing_whitespace
+                ):
+                    normalized_content = (
+                        normalized_content.rstrip(" \t\r\n") + trailing_whitespace
+                    )
+                return normalized_content
+            except requests.exceptions.HTTPError as exc:
+                response = exc.response
+                status_code = response.status_code if response is not None else None
+                if status_code not in NVIDIA_API_RETRYABLE_STATUS_CODES:
+                    raise TranslationError(
+                        "NVIDIA API request failed with a non-retryable status: "
+                        f"{status_code}"
+                    ) from exc
+                last_error = exc
+                if attempt >= NVIDIA_API_MAX_ATTEMPTS:
+                    break
+                delay_seconds = NVIDIA_API_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+                _append_runtime_log(
+                    f"Retrying NVIDIA translation after HTTP {status_code} "
+                    f"(attempt {attempt + 1}/{NVIDIA_API_MAX_ATTEMPTS}, wait {delay_seconds:.1f}s)"
+                )
+                time.sleep(delay_seconds)
+            except (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ConnectTimeout,
+                requests.exceptions.ReadTimeout,
+                requests.exceptions.Timeout,
+            ) as exc:
+                last_error = exc
+                if attempt >= NVIDIA_API_MAX_ATTEMPTS:
+                    break
+                delay_seconds = NVIDIA_API_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+                _append_runtime_log(
+                    f"Retrying NVIDIA translation after {type(exc).__name__} "
+                    f"(attempt {attempt + 1}/{NVIDIA_API_MAX_ATTEMPTS}, wait {delay_seconds:.1f}s)"
+                )
+                time.sleep(delay_seconds)
+            except requests.exceptions.RequestException as exc:
+                raise TranslationError(f"NVIDIA API request failed: {exc}") from exc
+
+        raise TranslationError(
+            "NVIDIA API request failed after multiple retries. "
+            f"Last error: {last_error}"
+        ) from last_error
 
     def _extract_content(self, data: object) -> str:
         if not isinstance(data, dict):
@@ -596,3 +678,31 @@ class NvidiaMarkdownTranslator:
         ):
             return True
         return False
+
+    def _should_retry_for_untranslated_output(
+        self, source_text: str, translated_text: str
+    ) -> bool:
+        source_english_words = len(re.findall(r"\b[A-Za-z]{2,}\b", source_text))
+        if source_english_words < 20:
+            return False
+
+        source_plain = self._normalize_for_translation_similarity(source_text)
+        translated_plain = self._normalize_for_translation_similarity(translated_text)
+        if not source_plain or not translated_plain:
+            return False
+
+        similarity = SequenceMatcher(None, source_plain, translated_plain).ratio()
+        translated_english_words = len(re.findall(r"\b[A-Za-z]{2,}\b", translated_text))
+        translated_chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", translated_text))
+
+        return (
+            similarity >= 0.85
+            and translated_english_words >= max(12, int(source_english_words * 0.7))
+            and translated_chinese_chars < max(8, source_english_words // 5)
+        )
+
+    def _normalize_for_translation_similarity(self, text: str) -> str:
+        normalized = PLACEHOLDER_SPLIT_REGEX.sub(" ", text)
+        normalized = re.sub(r"https?://\S+", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized)
+        return normalized.strip().lower()

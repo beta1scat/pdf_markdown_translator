@@ -12,6 +12,7 @@ from . import __version__
 from .config import AppConfig, load_config, save_config
 from .nvidia_models import NvidiaModelFetchError, fetch_nvidia_models
 from .paths import get_app_base_dir
+from .models import ConversionResult
 from .service import (
     MarkdownTranslationError,
     PdfConversionError,
@@ -32,6 +33,7 @@ class PdfToMarkdownApp:
         self.log_file_path = get_app_base_dir() / "app.log"
 
         self.input_path_var = tk.StringVar()
+        self.selected_input_paths: list[str] = []
         self.output_dir_var = tk.StringVar(value=str((Path.cwd() / "output").resolve()))
         self.translate_var = tk.BooleanVar(value=True)
         self.input_mode_var = tk.StringVar(value="pdf")
@@ -171,7 +173,7 @@ class PdfToMarkdownApp:
     def show_help(self) -> None:
         help_text = (
             "Input modes:\n"
-            "1. PDF: convert PDF to Markdown, save images, and optionally translate the Markdown.\n"
+            "1. PDF: convert one or more PDFs to Markdown, save images, and optionally translate the Markdown.\n"
             "2. Markdown: translate an existing Markdown or text file directly.\n\n"
             "Basic steps:\n"
             "1. Select the input type.\n"
@@ -180,7 +182,7 @@ class PdfToMarkdownApp:
             "4. Open Settings and fill in the Paddle/PDF API and NVIDIA API configuration.\n"
             "5. Click Run.\n\n"
             "Output rules:\n"
-            "- PDF mode writes files into OUTPUT_DIR/<pdf_name>/.\n"
+            "- PDF mode writes each selected PDF into OUTPUT_DIR/<pdf_name>/.\n"
             "- Markdown mode writes <file_name>_zh.md directly into the output directory.\n\n"
             "Notes:\n"
             "- PDF translation requires both the Paddle/PDF API and the NVIDIA API.\n"
@@ -437,6 +439,9 @@ class PdfToMarkdownApp:
         if self.input_mode_var.get() == "markdown":
             self.translate_var.set(True)
             self.status_var.set("Ready to translate a Markdown file directly.")
+            if self.selected_input_paths:
+                self.selected_input_paths = self.selected_input_paths[:1]
+                self.input_path_var.set(self.selected_input_paths[0])
         else:
             self.status_var.set("Ready.")
 
@@ -477,13 +482,22 @@ class PdfToMarkdownApp:
                 ("All files", "*.*"),
             ]
             title = "Select a Markdown file"
+            file_path = filedialog.askopenfilename(title=title, filetypes=filetypes)
+            if file_path:
+                self.selected_input_paths = [file_path]
+                self.input_path_var.set(file_path)
         else:
             filetypes = [("PDF files", "*.pdf")]
-            title = "Select a PDF file"
-
-        file_path = filedialog.askopenfilename(title=title, filetypes=filetypes)
-        if file_path:
-            self.input_path_var.set(file_path)
+            title = "Select one or more PDF files"
+            file_paths = list(
+                filedialog.askopenfilenames(title=title, filetypes=filetypes)
+            )
+            if file_paths:
+                self.selected_input_paths = file_paths
+                if len(file_paths) == 1:
+                    self.input_path_var.set(file_paths[0])
+                else:
+                    self.input_path_var.set(f"{len(file_paths)} PDF files selected")
 
     def select_output_dir(self) -> None:
         directory = filedialog.askdirectory(title="Select output directory")
@@ -498,8 +512,9 @@ class PdfToMarkdownApp:
         output_dir = self.output_dir_var.get().strip()
         translate_markdown = self.translate_var.get()
         input_mode = self.input_mode_var.get()
+        input_paths = self._get_selected_input_paths(input_mode, input_path)
 
-        if not input_path:
+        if not input_paths:
             messagebox.showerror("Missing Input File", "Please select an input file.")
             return
         if not output_dir:
@@ -521,45 +536,81 @@ class PdfToMarkdownApp:
         self.status_var.set(
             "Translating Markdown..."
             if input_mode == "markdown"
-            else "Converting PDF to Markdown..."
+            else (
+                f"Converting {len(input_paths)} PDF files..."
+                if len(input_paths) > 1
+                else "Converting PDF to Markdown..."
+            )
         )
         self._append_log(f"Input mode: {input_mode}")
-        self._append_log(f"Input file: {input_path}")
+        if len(input_paths) == 1:
+            self._append_log(f"Input file: {input_paths[0]}")
+        else:
+            self._append_log(f"Input files: {len(input_paths)} selected")
+            for index, path in enumerate(input_paths, start=1):
+                self._append_log(f"  {index}. {path}")
         self._append_log(f"Output directory: {output_dir}")
         self._append_log(f"Translate Markdown: {'yes' if translate_markdown else 'no'}")
 
         worker = threading.Thread(
             target=self._run_conversion,
-            args=(input_mode, input_path, output_dir, translate_markdown),
+            args=(input_mode, input_paths, output_dir, translate_markdown),
             daemon=True,
         )
         worker.start()
 
+    def _get_selected_input_paths(self, input_mode: str, input_path: str) -> list[str]:
+        if input_mode == "markdown":
+            return [input_path] if input_path else []
+        if self.selected_input_paths:
+            return self.selected_input_paths[:]
+        return [input_path] if input_path else []
+
     def _run_conversion(
         self,
         input_mode: str,
-        input_path: str,
+        input_paths: list[str],
         output_dir: str,
         translate_markdown: bool,
     ) -> None:
         try:
             if input_mode == "markdown":
                 result = translate_markdown_file(
-                    input_path,
+                    input_paths[0],
                     output_dir,
                     self.config,
                     phase_callback=self._update_phase_status,
                     progress_callback=self._update_translation_progress,
                 )
             else:
-                result = convert_pdf_to_markdown(
-                    input_path,
-                    output_dir,
-                    self.config,
-                    translate_markdown=translate_markdown,
-                    phase_callback=self._update_phase_status,
-                    progress_callback=self._update_translation_progress,
-                )
+                batch_results = []
+                for index, input_path in enumerate(input_paths, start=1):
+                    self.root.after(
+                        0,
+                        self.status_var.set,
+                        f"Processing PDF {index}/{len(input_paths)}: {Path(input_path).name}",
+                    )
+                    self.root.after(
+                        0,
+                        self._append_log,
+                        f"Starting PDF {index}/{len(input_paths)}: {input_path}",
+                    )
+                    self._last_progress_log_chars = -1
+                    batch_results.append(
+                        convert_pdf_to_markdown(
+                            input_path,
+                            output_dir,
+                            self.config,
+                            translate_markdown=translate_markdown,
+                            phase_callback=self._update_phase_status,
+                            progress_callback=self._update_translation_progress,
+                        )
+                    )
+                if len(batch_results) == 1:
+                    result = batch_results[0]
+                else:
+                    self.root.after(0, self._on_batch_success, batch_results)
+                    return
         except (PdfConversionError, MarkdownTranslationError) as exc:
             self.root.after(0, self._on_failure, str(exc))
             return
@@ -581,6 +632,44 @@ class PdfToMarkdownApp:
             result.timings.conversion_seconds,
             result.timings.translation_seconds,
             result.timings.total_seconds,
+        )
+
+    def _on_batch_success(self, results: list[ConversionResult]) -> None:
+        self.is_running = False
+        self.status_var.set(f"Completed {len(results)} PDF files.")
+        total_pages = 0
+        total_images = 0
+        total_conversion_seconds = 0.0
+        total_translation_seconds = 0.0
+        total_total_seconds = 0.0
+
+        for result in results:
+            total_pages += result.stats.page_count
+            total_images += result.stats.image_count
+            total_conversion_seconds += result.timings.conversion_seconds
+            total_translation_seconds += result.timings.translation_seconds
+            total_total_seconds += result.timings.total_seconds
+            self._append_log(f"Completed PDF: {result.markdown_path}")
+            if result.translated_markdown_path is not None:
+                self._append_log(
+                    f"Translated Markdown saved to: {result.translated_markdown_path}"
+                )
+
+        self._append_log(f"Batch completed: {len(results)} PDF files")
+        self._append_log(f"Total pages: {total_pages}, Total images: {total_images}")
+        self._append_log(f"Total conversion time: {total_conversion_seconds:.2f}s")
+        self._append_log(f"Total translation time: {total_translation_seconds:.2f}s")
+        self._append_log(f"Total elapsed time: {total_total_seconds:.2f}s")
+        messagebox.showinfo(
+            "Completed",
+            (
+                f"Processed {len(results)} PDF files.\n\n"
+                f"Total pages: {total_pages}\n"
+                f"Total images: {total_images}\n"
+                f"Conversion time: {total_conversion_seconds:.2f}s\n"
+                f"Translation time: {total_translation_seconds:.2f}s\n"
+                f"Total time: {total_total_seconds:.2f}s"
+            ),
         )
 
     def _on_success(
