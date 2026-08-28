@@ -9,6 +9,7 @@ permissions:
   contents: write
 
 jobs:
+  # ----------------- Windows 打包任务 -----------------
   build-windows:
     runs-on: windows-latest
 
@@ -41,3 +42,41 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/pdf-translator-*-windows-x64.exe
+
+  # ----------------- macOS 打包任务 (已修正) -----------------
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sync dependencies
+        run: uv sync --group dev
+
+      - name: Build APP
+        run: uv run pyinstaller --noconfirm --clean --windowed --onefile --name pdf-translator app.py
+
+      - name: Compress and Rename artifact
+        run: |
+          tag="${{ github.ref_name }}"
+          
+          # 因为使用了 --windowed，Mac 下只会生成 pdf-translator.app
+          # 我们进入 dist 目录将其打包成标准 zip 压缩包，方便 Mac 用户下载后解压使用
+          cd dist
+          zip -r "pdf-translator-$tag-macos-arm64.app.zip" pdf-translator.app
+          cd ..
+
+      - name: Publish release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          # 只发布标准且体验更好的 .app 压缩包
+          files: dist/pdf-translator-*-macos-arm64.app.zip
