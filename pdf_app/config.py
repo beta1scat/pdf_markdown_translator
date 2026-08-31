@@ -7,8 +7,9 @@ from dataclasses import asdict, dataclass
 from .paths import get_app_base_dir
 
 
-DEFAULT_API_URL = "https://f3c5z1l8l5o9ffa4.aistudio-app.com/layout-parsing"
+DEFAULT_API_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
 DEFAULT_API_TOKEN = ""
+DEFAULT_PDF_MODEL = "PaddleOCR-VL-1.6"
 DEFAULT_NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 DEFAULT_NVIDIA_MODEL = "openai/gpt-oss-120b"
 CONFIG_FILE_PATH = get_app_base_dir() / "app_config.json"
@@ -18,6 +19,7 @@ CONFIG_FILE_PATH = get_app_base_dir() / "app_config.json"
 class AppConfig:
     api_url: str = DEFAULT_API_URL
     api_token: str = DEFAULT_API_TOKEN
+    pdf_model: str = DEFAULT_PDF_MODEL
     request_timeout_seconds: int = 300
     nvidia_api_url: str = DEFAULT_NVIDIA_API_URL
     nvidia_api_key: str = ""
@@ -45,16 +47,17 @@ def _read_config_file() -> dict[str, object]:
 
 def load_config() -> AppConfig:
     file_config = _read_config_file()
-    return AppConfig(
-        api_url=str(file_config.get("api_url", os.getenv("PDF_MD_API_URL", DEFAULT_API_URL))).strip(),
+    config = AppConfig(
+        api_url=str(file_config.get("api_url", os.getenv("PDF_MD_API_URL", DEFAULT_API_URL))).strip() or DEFAULT_API_URL,
         api_token=str(file_config.get("api_token", os.getenv("PDF_MD_API_TOKEN", DEFAULT_API_TOKEN))).strip(),
+        pdf_model=str(file_config.get("pdf_model", os.getenv("PDF_MD_MODEL", DEFAULT_PDF_MODEL))).strip() or DEFAULT_PDF_MODEL,
         request_timeout_seconds=_coerce_int(
             file_config.get("request_timeout_seconds", os.getenv("PDF_MD_TIMEOUT_SECONDS", "300")),
             300,
         ),
-        nvidia_api_url=str(file_config.get("nvidia_api_url", os.getenv("NVIDIA_API_URL", DEFAULT_NVIDIA_API_URL))).strip(),
+        nvidia_api_url=str(file_config.get("nvidia_api_url", os.getenv("NVIDIA_API_URL", DEFAULT_NVIDIA_API_URL))).strip() or DEFAULT_NVIDIA_API_URL,
         nvidia_api_key=str(file_config.get("nvidia_api_key", os.getenv("NVIDIA_API_KEY", ""))).strip(),
-        nvidia_model=str(file_config.get("nvidia_model", os.getenv("NVIDIA_MODEL", DEFAULT_NVIDIA_MODEL))).strip(),
+        nvidia_model=str(file_config.get("nvidia_model", os.getenv("NVIDIA_MODEL", DEFAULT_NVIDIA_MODEL))).strip() or DEFAULT_NVIDIA_MODEL,
         max_requests_per_minute=_coerce_int(
             file_config.get(
                 "max_requests_per_minute",
@@ -70,6 +73,9 @@ def load_config() -> AppConfig:
             3,
         ),
     )
+    if not CONFIG_FILE_PATH.is_file():
+        save_config(config)
+    return config
 
 
 def save_config(config: AppConfig) -> None:

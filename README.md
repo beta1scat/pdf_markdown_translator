@@ -69,6 +69,7 @@ Use the `Settings` button in the main window to edit and save:
 
 - `Paddle/PDF API URL`
 - `Paddle/PDF API Token`
+- `Paddle/PDF Model`
 - `Request Timeout (s)`
 - `NVIDIA API URL`
 - `NVIDIA API Key`

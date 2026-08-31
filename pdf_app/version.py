@@ -1,11 +1,36 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
+import subprocess
 import sys
-import tomllib
+
+try:
+    import tomllib
+except ImportError:
+    tomllib = None  # type: ignore[assignment]
 
 
-DEFAULT_VERSION = "0.1.2"
+DEFAULT_VERSION = "0.1.5"
+
+
+def _get_version_from_git() -> str | None:
+    # Do not call git if packaged as frozen executable (PyInstaller)
+    if getattr(sys, "frozen", False):
+        return None
+    try:
+        repo_dir = Path(__file__).resolve().parent.parent
+        output = subprocess.check_output(
+            ["git", "describe", "--tags", "--always"],
+            cwd=repo_dir,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        ).decode("utf-8").strip()
+        if output:
+            return output.lstrip("v")
+    except Exception:
+        pass
+    return None
 
 
 def _get_pyproject_path() -> Path:
@@ -17,27 +42,48 @@ def _get_pyproject_path() -> Path:
     return Path(__file__).resolve().parent.parent / "pyproject.toml"
 
 
-def load_version() -> str:
+def _get_version_from_pyproject() -> str | None:
     pyproject_path = _get_pyproject_path()
     if not pyproject_path.is_file():
-        return DEFAULT_VERSION
+        return None
+
+    if tomllib is not None:
+        try:
+            with pyproject_path.open("rb") as file:
+                data = tomllib.load(file)
+            project = data.get("project")
+            if isinstance(project, dict):
+                version = project.get("version")
+                if isinstance(version, str) and version.strip():
+                    return version.strip()
+        except (OSError, tomllib.TOMLDecodeError):
+            pass
 
     try:
-        with pyproject_path.open("rb") as file:
-            data = tomllib.load(file)
-    except (OSError, tomllib.TOMLDecodeError):
-        return DEFAULT_VERSION
+        content = pyproject_path.read_text(encoding="utf-8")
+        match = re.search(r'version\s*=\s*["\']([^"\']+)["\']', content)
+        if match:
+            return match.group(1).strip()
+    except OSError:
+        pass
 
-    project = data.get("project")
-    if not isinstance(project, dict):
-        return DEFAULT_VERSION
+    return None
 
-    version = project.get("version")
-    if not isinstance(version, str):
-        return DEFAULT_VERSION
 
-    version = version.strip()
-    return version or DEFAULT_VERSION
+def load_version() -> str:
+    # 1. Dynamically read git tag if running from git repo
+    git_version = _get_version_from_git()
+    if git_version:
+        return git_version
+
+    # 2. Read from pyproject.toml
+    pyproject_version = _get_version_from_pyproject()
+    if pyproject_version:
+        return pyproject_version
+
+    # 3. Fallback default
+    return DEFAULT_VERSION
 
 
 __version__ = load_version()
+

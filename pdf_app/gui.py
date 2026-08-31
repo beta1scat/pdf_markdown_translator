@@ -151,6 +151,7 @@ class PdfToMarkdownApp:
         self._append_log("App initialized.")
         self._append_log(f"App version: {__version__}")
         self._append_log(f"PDF API URL: {self.config.api_url}")
+        self._append_log(f"PDF Model: {self.config.pdf_model}")
         self._append_log(f"NVIDIA API URL: {self.config.nvidia_api_url}")
         self._append_log(
             f"NVIDIA rate limit: {self.config.max_requests_per_minute} requests/minute."
@@ -198,7 +199,7 @@ class PdfToMarkdownApp:
 
         window = tk.Toplevel(self.root)
         window.title("Settings")
-        window.geometry("720x360")
+        window.geometry("720x460")
         window.resizable(False, False)
         window.transient(self.root)
         window.grab_set()
@@ -206,6 +207,7 @@ class PdfToMarkdownApp:
 
         api_url_var = tk.StringVar(value=self.config.api_url)
         api_token_var = tk.StringVar(value=self.config.api_token)
+        pdf_model_var = tk.StringVar(value=self.config.pdf_model)
         timeout_var = tk.StringVar(value=str(self.config.request_timeout_seconds))
         nvidia_url_var = tk.StringVar(value=self.config.nvidia_api_url)
         nvidia_key_var = tk.StringVar(value=self.config.nvidia_api_key)
@@ -221,6 +223,7 @@ class PdfToMarkdownApp:
         fields = [
             ("Paddle/PDF API URL", api_url_var, False),
             ("Paddle/PDF API Token", api_token_var, True),
+            ("Paddle/PDF Model", pdf_model_var, False),
             ("Request Timeout (s)", timeout_var, False),
             ("NVIDIA API URL", nvidia_url_var, False),
             ("NVIDIA API Key", nvidia_key_var, True),
@@ -286,6 +289,7 @@ class PdfToMarkdownApp:
                 window,
                 api_url_var.get(),
                 api_token_var.get(),
+                pdf_model_var.get(),
                 timeout_var.get(),
                 nvidia_url_var.get(),
                 nvidia_key_var.get(),
@@ -328,6 +332,7 @@ class PdfToMarkdownApp:
         temp_config = AppConfig(
             api_url=self.config.api_url,
             api_token=self.config.api_token,
+            pdf_model=self.config.pdf_model,
             request_timeout_seconds=timeout_value,
             nvidia_api_url=nvidia_api_url.strip() or self.config.nvidia_api_url,
             nvidia_api_key=nvidia_api_key.strip(),
@@ -355,6 +360,7 @@ class PdfToMarkdownApp:
         window: tk.Toplevel,
         api_url: str,
         api_token: str,
+        pdf_model: str,
         timeout_seconds: str,
         nvidia_api_url: str,
         nvidia_api_key: str,
@@ -364,6 +370,7 @@ class PdfToMarkdownApp:
     ) -> None:
         api_url = api_url.strip()
         api_token = api_token.strip()
+        pdf_model = pdf_model.strip() or "PaddleOCR-VL-1.6"
         nvidia_api_url = nvidia_api_url.strip()
         nvidia_api_key = nvidia_api_key.strip()
         nvidia_model = nvidia_model.strip()
@@ -371,11 +378,6 @@ class PdfToMarkdownApp:
         if not api_url:
             messagebox.showerror(
                 "Invalid Settings", "Paddle/PDF API URL is required.", parent=window
-            )
-            return
-        if not api_token:
-            messagebox.showerror(
-                "Invalid Settings", "Paddle/PDF API token is required.", parent=window
             )
             return
         if not nvidia_api_url:
@@ -412,6 +414,7 @@ class PdfToMarkdownApp:
         self.config = AppConfig(
             api_url=api_url,
             api_token=api_token,
+            pdf_model=pdf_model,
             request_timeout_seconds=timeout_value,
             nvidia_api_url=nvidia_api_url,
             nvidia_api_key=nvidia_api_key,
@@ -422,6 +425,7 @@ class PdfToMarkdownApp:
         save_config(self.config)
         self._append_log("Settings saved.")
         self._append_log(f"PDF API URL: {self.config.api_url}")
+        self._append_log(f"PDF Model: {self.config.pdf_model}")
         self._append_log(f"NVIDIA API URL: {self.config.nvidia_api_url}")
         self._append_log(f"NVIDIA model: {self.config.nvidia_model}")
         self._append_log(
@@ -447,7 +451,10 @@ class PdfToMarkdownApp:
             "completed": "Completed.",
             "failed": "Failed.",
         }
-        message = phase_map.get(phase, phase)
+        if phase.startswith("converting ("):
+            message = f"Converting PDF to Markdown {phase[len('converting '):]}..."
+        else:
+            message = phase_map.get(phase, phase)
         self.root.after(0, self.status_var.set, message)
         self.root.after(0, self._append_log, f"Phase: {message}")
 

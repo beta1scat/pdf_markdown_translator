@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import html
+import json
 import re
 import time
 from datetime import datetime
@@ -49,11 +50,159 @@ def _encode_pdf(file_path: Path) -> str:
     return base64.b64encode(file_path.read_bytes()).decode("ascii")
 
 
-def call_layout_api(file_path: Path, config: AppConfig) -> dict:
+def _call_layout_api_v2(
+    file_path: Path,
+    config: AppConfig,
+    phase_callback: PhaseCallback | None = None,
+) -> dict:
+    headers: dict[str, str] = {}
+    if config.api_token:
+        headers["Authorization"] = f"bearer {config.api_token}"
+
+    optional_payload = {
+        "useDocOrientationClassify": False,
+        "useDocUnwarping": False,
+        "useChartRecognition": False,
+    }
+
+    data = {
+        "model": config.pdf_model or "PaddleOCR-VL-1.6",
+        "optionalPayload": json.dumps(optional_payload),
+    }
+
+    _append_runtime_log(
+        f"Submitting PDF job to {config.api_url} (model: {data['model']})..."
+    )
+    connect_timeout = max(
+        5, min(config.request_timeout_seconds, LAYOUT_API_CONNECT_TIMEOUT_CAP_SECONDS)
+    )
+
+    try:
+        with file_path.open("rb") as f:
+            files = {"file": f}
+            job_response = requests.post(
+                config.api_url,
+                headers=headers,
+                data=data,
+                files=files,
+                timeout=(connect_timeout, config.request_timeout_seconds),
+            )
+    except requests.exceptions.RequestException as exc:
+        raise PdfConversionError(f"Failed to submit OCR job: {exc}") from exc
+
+    if job_response.status_code != 200:
+        raise PdfConversionError(
+            f"Layout API job submission failed with status {job_response.status_code}: {job_response.text[:400]}"
+        )
+
+    try:
+        job_data = job_response.json()
+        job_id = job_data.get("data", {}).get("jobId")
+    except Exception as exc:
+        raise PdfConversionError(
+            f"Invalid JSON response from Layout API: {job_response.text[:300]}"
+        ) from exc
+
+    if not job_id:
+        raise PdfConversionError(
+            f"Layout API did not return a jobId: {job_response.text[:300]}"
+        )
+
+    _append_runtime_log(
+        f"Job submitted successfully. Job ID: {job_id}. Polling for results..."
+    )
+
+    job_detail_url = f"{config.api_url.rstrip('/')}/{job_id}"
+    poll_interval = 3
+    start_poll_time = time.time()
+    jsonl_url: str = ""
+
+    while True:
+        if time.time() - start_poll_time > config.request_timeout_seconds:
+            raise PdfConversionError(
+                f"Layout API job {job_id} timed out after {config.request_timeout_seconds} seconds."
+            )
+
+        try:
+            poll_resp = requests.get(
+                job_detail_url,
+                headers=headers,
+                timeout=(connect_timeout, 30),
+            )
+            if poll_resp.status_code == 200:
+                poll_data = poll_resp.json().get("data", {})
+                state = poll_data.get("state")
+                if state == "pending":
+                    _append_runtime_log(f"Job {job_id} is pending in queue...")
+                elif state == "running":
+                    progress = poll_data.get("extractProgress", {})
+                    total_pages = progress.get("totalPages")
+                    extracted_pages = progress.get("extractedPages")
+                    if total_pages is not None and extracted_pages is not None:
+                        log_msg = f"Job {job_id} is running: {extracted_pages}/{total_pages} pages extracted."
+                        _append_runtime_log(log_msg)
+                        if phase_callback:
+                            phase_callback(f"converting ({extracted_pages}/{total_pages} pages)")
+                    else:
+                        _append_runtime_log(f"Job {job_id} is running...")
+                elif state == "done":
+                    progress = poll_data.get("extractProgress", {})
+                    extracted = progress.get("extractedPages", "all")
+                    _append_runtime_log(
+                        f"Job {job_id} completed successfully (extracted {extracted} pages)."
+                    )
+                    result_url_info = poll_data.get("resultUrl", {})
+                    jsonl_url = result_url_info.get("jsonUrl") or ""
+                    break
+                elif state == "failed":
+                    error_msg = poll_data.get("errorMsg", "Unknown failure")
+                    raise PdfConversionError(f"Layout API job failed: {error_msg}")
+            else:
+                _append_runtime_log(
+                    f"Job polling returned status {poll_resp.status_code}, retrying..."
+                )
+        except requests.exceptions.RequestException as exc:
+            _append_runtime_log(f"Job poll network warning: {exc}, will retry...")
+
+        time.sleep(poll_interval)
+
+    if not jsonl_url:
+        raise PdfConversionError(
+            "Layout API job completed but no jsonUrl was provided in the result."
+        )
+
+    _append_runtime_log(f"Downloading result JSONL from {jsonl_url}...")
+    try:
+        jsonl_response = requests.get(
+            jsonl_url, timeout=(connect_timeout, config.request_timeout_seconds)
+        )
+        jsonl_response.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        raise PdfConversionError(
+            f"Failed to download Layout API JSONL results: {exc}"
+        ) from exc
+
+    combined_layout_results: list[dict] = []
+    for line in jsonl_response.text.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            line_json = json.loads(line)
+            res = line_json.get("result", {})
+            combined_layout_results.extend(res.get("layoutParsingResults", []))
+        except json.JSONDecodeError:
+            continue
+
+    return {"layoutParsingResults": combined_layout_results}
+
+
+def _call_layout_api_v1(file_path: Path, config: AppConfig) -> dict:
     headers = {
-        "Authorization": f"token {config.api_token}",
         "Content-Type": "application/json",
     }
+    if config.api_token:
+        headers["Authorization"] = f"token {config.api_token}"
     required_payload = {
         "file": _encode_pdf(file_path),
         "fileType": 0,
@@ -157,6 +306,17 @@ def call_layout_api(file_path: Path, config: AppConfig) -> dict:
         )
 
     raise PdfConversionError(last_error or "Layout API request failed.")
+
+
+def call_layout_api(
+    file_path: Path,
+    config: AppConfig,
+    phase_callback: PhaseCallback | None = None,
+) -> dict:
+    if "jobs" in config.api_url.lower() or "api/v2" in config.api_url.lower():
+        return _call_layout_api_v2(file_path, config, phase_callback=phase_callback)
+    return _call_layout_api_v1(file_path, config)
+
 
 
 def merge_markdown(result: dict) -> str:
@@ -467,7 +627,7 @@ def convert_pdf_to_markdown(
     if phase_callback is not None:
         phase_callback("converting")
     conversion_start = time.perf_counter()
-    result = call_layout_api(source_path, config)
+    result = call_layout_api(source_path, config, phase_callback=phase_callback)
     merged_markdown = merge_trailing_hyphenated_words(merge_markdown(result))
     markdown_path = document_output_dir / f"{source_path.stem}_full.md"
     markdown_path.write_text(merged_markdown, encoding="utf-8")

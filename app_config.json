@@ -1,6 +1,7 @@
 {
-  "api_url": "https://f3c5z1l8l5o9ffa4.aistudio-app.com/layout-parsing",
+  "api_url": "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
   "api_token": "",
+  "pdf_model": "PaddleOCR-VL-1.6",
   "request_timeout_seconds": 300,
   "nvidia_api_url": "https://integrate.api.nvidia.com/v1/chat/completions",
   "nvidia_api_key": "",
