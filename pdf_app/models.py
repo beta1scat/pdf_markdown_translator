@@ -26,3 +26,18 @@ class ConversionResult:
     translated_html_path: Path | None
     stats: ConversionStats
     timings: TimingStats
+
+
+@dataclass(frozen=True)
+class FileConversionItem:
+    file_path: Path
+    result: ConversionResult | None = None
+    error: str | None = None
+    is_success: bool = True
+
+
+@dataclass(frozen=True)
+class BatchConversionResult:
+    items: list[FileConversionItem]
+    total_time_seconds: float
+

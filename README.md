@@ -30,7 +30,7 @@ The app supports two input modes.
 
 Workflow:
 
-1. Select a `.pdf` file.
+1. Select one or multiple `.pdf` files (supports `Cmd+Click` / `Shift+Click`).
 2. Select an output directory.
 3. Optionally enable Markdown translation.
 4. Click `Run`.
@@ -43,14 +43,14 @@ Output:
 
 Notes:
 
-- PDF mode always creates a subfolder named after the PDF file.
-- This is required because Markdown and extracted images must stay together.
+- PDF mode always creates a subfolder named after each PDF file.
+- When multiple PDFs are selected, they are converted sequentially in a batch queue.
 
 ### Markdown Mode
 
 Workflow:
 
-1. Select a `.md`, `.markdown`, or `.txt` file.
+1. Select one or multiple `.md`, `.markdown`, or `.txt` files.
 2. Select an output directory.
 3. Click `Run`.
 
@@ -61,7 +61,7 @@ Output:
 Notes:
 
 - Markdown mode does not create a per-file subfolder.
-- The translated file is written directly into the selected output directory.
+- The translated file(s) are written directly into the selected output directory.
 
 ## Settings
 

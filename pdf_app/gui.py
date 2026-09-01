@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 from datetime import datetime
+import re
 import threading
 import traceback
 import tkinter as tk
@@ -10,6 +9,7 @@ from typing import cast
 
 from . import __version__
 from .config import AppConfig, load_config, save_config
+from .models import BatchConversionResult, FileConversionItem
 from .nvidia_models import NvidiaModelFetchError, fetch_nvidia_models
 from .paths import get_app_base_dir
 from .service import (
@@ -31,6 +31,7 @@ class PdfToMarkdownApp:
         self.is_running = False
         self.log_file_path = get_app_base_dir() / "app.log"
 
+        self.selected_files: list[Path] = []
         self.input_path_var = tk.StringVar()
         self.output_dir_var = tk.StringVar(value=str((Path.cwd() / "output").resolve()))
         self.translate_var = tk.BooleanVar(value=True)
@@ -68,7 +69,7 @@ class PdfToMarkdownApp:
             command=self._on_mode_change,
         ).pack(side=tk.LEFT, padx=(16, 0))
 
-        ttk.Label(container, text="Input File").grid(
+        ttk.Label(container, text="Input Files").grid(
             row=1, column=0, sticky="w", pady=(0, 12)
         )
         ttk.Entry(container, textvariable=self.input_path_var).grid(
@@ -438,9 +439,11 @@ class PdfToMarkdownApp:
         messagebox.showinfo("Settings Saved", "Configuration saved successfully.")
 
     def _on_mode_change(self) -> None:
+        self.selected_files = []
+        self.input_path_var.set("")
         if self.input_mode_var.get() == "markdown":
             self.translate_var.set(True)
-            self.status_var.set("Ready to translate a Markdown file directly.")
+            self.status_var.set("Ready to translate Markdown file(s) directly.")
         else:
             self.status_var.set("Ready.")
 
@@ -483,14 +486,41 @@ class PdfToMarkdownApp:
                 ("Text files", "*.txt"),
                 ("All files", "*.*"),
             ]
-            title = "Select a Markdown file"
+            title = "Select Markdown file(s)"
         else:
-            filetypes = [("PDF files", "*.pdf")]
-            title = "Select a PDF file"
+            filetypes = [("PDF files", "*.pdf"), ("All files", "*.*")]
+            title = "Select PDF file(s)"
 
-        file_path = filedialog.askopenfilename(title=title, filetypes=filetypes)
-        if file_path:
-            self.input_path_var.set(file_path)
+        selected = filedialog.askopenfilenames(title=title, filetypes=filetypes)
+        if selected:
+            paths = [Path(p).resolve() for p in selected]
+            self.selected_files = paths
+            if len(paths) == 1:
+                self.input_path_var.set(str(paths[0]))
+            else:
+                preview = "; ".join(p.name for p in paths[:3])
+                if len(paths) > 3:
+                    preview += f"... (+{len(paths) - 3} more)"
+                self.input_path_var.set(f"[{len(paths)} files] {preview}")
+
+    def _resolve_input_files(self) -> list[Path]:
+        raw_input = self.input_path_var.get().strip()
+        if not raw_input:
+            return []
+
+        if self.selected_files:
+            if len(self.selected_files) == 1 and str(self.selected_files[0]) == raw_input:
+                return self.selected_files
+            if raw_input.startswith(f"[{len(self.selected_files)} files]"):
+                return self.selected_files
+
+        parts = [p.strip() for p in re.split(r"[;\n\r]+", raw_input) if p.strip()]
+        resolved: list[Path] = []
+        for part in parts:
+            cleaned = part.strip("\"'")
+            if cleaned:
+                resolved.append(Path(cleaned).expanduser().resolve())
+        return resolved
 
     def select_output_dir(self) -> None:
         directory = filedialog.askdirectory(title="Select output directory")
@@ -501,13 +531,15 @@ class PdfToMarkdownApp:
         if self.is_running:
             return
 
-        input_path = self.input_path_var.get().strip()
+        files = self._resolve_input_files()
         output_dir = self.output_dir_var.get().strip()
         translate_markdown = self.translate_var.get()
         input_mode = self.input_mode_var.get()
 
-        if not input_path:
-            messagebox.showerror("Missing Input File", "Please select an input file.")
+        if not files:
+            messagebox.showerror(
+                "Missing Input File", "Please select at least one input file."
+            )
             return
         if not output_dir:
             messagebox.showerror(
@@ -525,123 +557,208 @@ class PdfToMarkdownApp:
 
         self.is_running = True
         self._last_progress_log_chars = -1
-        self.status_var.set(
-            "Translating Markdown..."
-            if input_mode == "markdown"
-            else "Converting PDF to Markdown..."
-        )
+        self.status_var.set(f"Starting batch of {len(files)} file(s)...")
         self._append_log(f"Input mode: {input_mode}")
-        self._append_log(f"Input file: {input_path}")
+        self._append_log(f"Files to process: {len(files)}")
+        for i, f in enumerate(files, 1):
+            self._append_log(f"  [{i}/{len(files)}] {f}")
         self._append_log(f"Output directory: {output_dir}")
         self._append_log(f"Translate Markdown: {'yes' if translate_markdown else 'no'}")
 
         worker = threading.Thread(
-            target=self._run_conversion,
-            args=(input_mode, input_path, output_dir, translate_markdown),
+            target=self._run_batch_conversion,
+            args=(input_mode, files, output_dir, translate_markdown),
             daemon=True,
         )
         worker.start()
 
-    def _run_conversion(
+    def _run_batch_conversion(
         self,
         input_mode: str,
-        input_path: str,
+        files: list[Path],
         output_dir: str,
         translate_markdown: bool,
     ) -> None:
-        try:
-            if input_mode == "markdown":
-                result = translate_markdown_file(
-                    input_path,
-                    output_dir,
-                    self.config,
-                    phase_callback=self._update_phase_status,
-                    progress_callback=self._update_translation_progress,
+        total_start = time.perf_counter()
+        total_files = len(files)
+        items: list[FileConversionItem] = []
+
+        for index, file_path in enumerate(files, 1):
+            file_prefix = f"[{index}/{total_files}]"
+            self.root.after(
+                0,
+                self._append_log,
+                f"\n=== {file_prefix} Processing: {file_path.name} ===",
+            )
+            self.root.after(
+                0,
+                self.status_var.set,
+                f"{file_prefix} Processing {file_path.name}...",
+            )
+
+            def file_phase_callback(
+                phase: str, pfx: str = file_prefix, fname: str = file_path.name
+            ) -> None:
+                if phase.startswith("converting ("):
+                    status_msg = f"{pfx} Converting {fname} {phase[len('converting '):]}"
+                    log_msg = f"Phase: Converting PDF {phase[len('converting '):]}"
+                elif phase == "converting":
+                    status_msg = f"{pfx} Converting {fname} to Markdown..."
+                    log_msg = "Phase: Converting PDF to Markdown..."
+                elif phase == "translating":
+                    status_msg = f"{pfx} Translating {fname}..."
+                    log_msg = "Phase: Translating Markdown..."
+                elif phase == "completed":
+                    status_msg = f"{pfx} Completed {fname}."
+                    log_msg = "Phase: Completed."
+                elif phase == "failed":
+                    status_msg = f"{pfx} Failed {fname}."
+                    log_msg = "Phase: Failed."
+                else:
+                    status_msg = f"{pfx} {phase}"
+                    log_msg = f"Phase: {phase}"
+
+                self.root.after(0, self.status_var.set, status_msg)
+                self.root.after(0, self._append_log, log_msg)
+
+            try:
+                if input_mode == "markdown":
+                    result = translate_markdown_file(
+                        file_path,
+                        output_dir,
+                        self.config,
+                        phase_callback=file_phase_callback,
+                        progress_callback=self._update_translation_progress,
+                    )
+                else:
+                    result = convert_pdf_to_markdown(
+                        file_path,
+                        output_dir,
+                        self.config,
+                        translate_markdown=translate_markdown,
+                        phase_callback=file_phase_callback,
+                        progress_callback=self._update_translation_progress,
+                    )
+                items.append(
+                    FileConversionItem(
+                        file_path=file_path, result=result, is_success=True
+                    )
+                )
+                self.root.after(
+                    0,
+                    self._append_log,
+                    f"✓ {file_prefix} Successfully processed {file_path.name} in {result.timings.total_seconds:.2f}s",
+                )
+            except (PdfConversionError, MarkdownTranslationError) as exc:
+                items.append(
+                    FileConversionItem(
+                        file_path=file_path, error=str(exc), is_success=False
+                    )
+                )
+                self.root.after(
+                    0,
+                    self._append_log,
+                    f"✗ {file_prefix} Failed {file_path.name}: {exc}",
+                )
+            except Exception as exc:
+                stack = traceback.format_exc()
+                err_text = f"{exc}\n{stack}"
+                items.append(
+                    FileConversionItem(
+                        file_path=file_path, error=err_text, is_success=False
+                    )
+                )
+                self.root.after(
+                    0,
+                    self._append_log,
+                    f"✗ {file_prefix} Error on {file_path.name}: {err_text}",
+                )
+
+        total_time = time.perf_counter() - total_start
+        batch_result = BatchConversionResult(items=items, total_time_seconds=total_time)
+        self.root.after(0, self._on_batch_complete, batch_result)
+
+    def _on_batch_complete(self, batch_result: BatchConversionResult) -> None:
+        self.is_running = False
+        success_items = [
+            item
+            for item in batch_result.items
+            if item.is_success and item.result is not None
+        ]
+        failed_items = [item for item in batch_result.items if not item.is_success]
+
+        total_count = len(batch_result.items)
+        success_count = len(success_items)
+        failed_count = len(failed_items)
+        total_pages = sum(
+            item.result.stats.page_count for item in success_items if item.result
+        )
+        total_images = sum(
+            item.result.stats.image_count for item in success_items if item.result
+        )
+
+        self._append_log("\n================ BATCH SUMMARY ================")
+        self._append_log(f"Total files: {total_count}")
+        self._append_log(f"Successful: {success_count}")
+        self._append_log(f"Failed: {failed_count}")
+        self._append_log(f"Total Pages: {total_pages}, Total Images: {total_images}")
+        self._append_log(f"Total Elapsed Time: {batch_result.total_time_seconds:.2f}s")
+        self._append_log("===============================================\n")
+
+        if failed_count == 0:
+            self.status_var.set("All files completed successfully.")
+        elif success_count == 0:
+            self.status_var.set("All files failed.")
+        else:
+            self.status_var.set(
+                f"Completed with {success_count} succeeded, {failed_count} failed."
+            )
+
+        if total_count == 1:
+            item = batch_result.items[0]
+            if item.is_success and item.result is not None:
+                res = item.result
+                translated_label = res.translated_markdown_path or "Not generated"
+                translated_html_label = res.translated_html_path or "Not generated"
+                html_label = res.html_path or "Not generated"
+                messagebox.showinfo(
+                    "Completed",
+                    (
+                        f"File: {item.file_path.name}\n\n"
+                        f"Markdown saved to:\n{res.markdown_path}\n\n"
+                        f"HTML saved to:\n{html_label}\n\n"
+                        f"Translated Markdown:\n{translated_label}\n\n"
+                        f"Translated HTML:\n{translated_html_label}\n\n"
+                        f"Pages: {res.stats.page_count}\nImages: {res.stats.image_count}\n"
+                        f"Conversion time: {res.timings.conversion_seconds:.2f}s\n"
+                        f"Translation time: {res.timings.translation_seconds:.2f}s\n"
+                        f"Total time: {res.timings.total_seconds:.2f}s"
+                    ),
                 )
             else:
-                result = convert_pdf_to_markdown(
-                    input_path,
-                    output_dir,
-                    self.config,
-                    translate_markdown=translate_markdown,
-                    phase_callback=self._update_phase_status,
-                    progress_callback=self._update_translation_progress,
+                messagebox.showerror(
+                    "Conversion Failed",
+                    f"File: {item.file_path.name}\n\nError:\n{item.error or 'Unknown error'}",
                 )
-        except (PdfConversionError, MarkdownTranslationError) as exc:
-            self.root.after(0, self._on_failure, str(exc))
-            return
-        except Exception as exc:
-            stack = traceback.format_exc()
-            self.root.after(0, self._on_failure, f"{exc}\n\n{stack}")
-            return
+        else:
+            summary_lines = [
+                f"Batch Finished in {batch_result.total_time_seconds:.2f}s\n",
+                f"Total files: {total_count}",
+                f"Succeeded: {success_count}",
+                f"Failed: {failed_count}",
+                f"Total Pages: {total_pages} | Total Images: {total_images}\n",
+            ]
+            if failed_items:
+                summary_lines.append("Failed Files:")
+                for f_item in failed_items:
+                    err_brief = (f_item.error or "Unknown error").splitlines()[0][:100]
+                    summary_lines.append(f"• {f_item.file_path.name}: {err_brief}")
 
-        self.root.after(
-            0,
-            self._on_success,
-            result.markdown_path,
-            result.html_path,
-            result.translated_markdown_path,
-            result.translated_html_path,
-            result.output_dir,
-            result.stats.page_count,
-            result.stats.image_count,
-            result.timings.conversion_seconds,
-            result.timings.translation_seconds,
-            result.timings.total_seconds,
-        )
-
-    def _on_success(
-        self,
-        markdown_path: Path,
-        html_path: Path | None,
-        translated_markdown_path: Path | None,
-        translated_html_path: Path | None,
-        output_dir: Path,
-        page_count: int,
-        image_count: int,
-        conversion_seconds: float,
-        translation_seconds: float,
-        total_seconds: float,
-    ) -> None:
-        self.is_running = False
-        self.status_var.set("Completed.")
-        self._append_log(f"Source Markdown: {markdown_path}")
-        if html_path is not None:
-            self._append_log(f"Source HTML saved to: {html_path}")
-        if translated_markdown_path is not None:
-            self._append_log(
-                f"Translated Markdown saved to: {translated_markdown_path}"
-            )
-        if translated_html_path is not None:
-            self._append_log(f"Translated HTML saved to: {translated_html_path}")
-        self._append_log(f"Output folder: {output_dir}")
-        self._append_log(f"Pages: {page_count}, Images: {image_count}")
-        self._append_log(f"Conversion time: {conversion_seconds:.2f}s")
-        self._append_log(f"Translation time: {translation_seconds:.2f}s")
-        self._append_log(f"Total time: {total_seconds:.2f}s")
-
-        translated_label = translated_markdown_path or "Not generated"
-        translated_html_label = translated_html_path or "Not generated"
-        html_label = html_path or "Not generated"
-        messagebox.showinfo(
-            "Completed",
-            (
-                f"Markdown saved to:\n{markdown_path}\n\n"
-                f"HTML saved to:\n{html_label}\n\n"
-                f"Translated Markdown:\n{translated_label}\n\n"
-                f"Translated HTML:\n{translated_html_label}\n\n"
-                f"Pages: {page_count}\nImages: {image_count}\n"
-                f"Conversion time: {conversion_seconds:.2f}s\n"
-                f"Translation time: {translation_seconds:.2f}s\n"
-                f"Total time: {total_seconds:.2f}s"
-            ),
-        )
-
-    def _on_failure(self, error_message: str) -> None:
-        self.is_running = False
-        self.status_var.set("Failed.")
-        self._append_log(f"Error: {error_message}")
-        messagebox.showerror("Conversion Failed", error_message)
+            summary_text = "\n".join(summary_lines)
+            if failed_count == 0:
+                messagebox.showinfo("Batch Completed", summary_text)
+            else:
+                messagebox.showwarning("Batch Completed with Errors", summary_text)
 
     def _append_log(self, message: str) -> None:
         timestamped = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
@@ -657,3 +774,4 @@ def run() -> None:
     root = tk.Tk()
     PdfToMarkdownApp(root)
     root.mainloop()
+
