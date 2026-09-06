@@ -1,0 +1,15 @@
+{
+  "api_url": "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
+  "api_token": "YOUR_PADDLEOCR_TOKEN_HERE",
+  "pdf_model": "PaddleOCR-VL-1.6",
+  "request_timeout_seconds": 300,
+  "llm_provider": "Zhipu AI (智谱)",
+  "llm_api_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+  "llm_api_key": "",
+  "llm_model": "glm-4.7-flash",
+  "max_requests_per_minute": 30,
+  "translation_concurrency": 1,
+  "translation_chunk_size": 10000,
+  "provider_keys": {},
+  "provider_models": {}
+}

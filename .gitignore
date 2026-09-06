@@ -8,4 +8,6 @@ __pycache__
 
 .venv/
 app_config.json
-app_config_my.json
+output/
+.translation_cache.db*
+.DS_Store
