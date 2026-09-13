@@ -842,6 +842,9 @@ def translate_markdown_file(
     original_markdown = merge_trailing_hyphenated_words(
         center_images_markdown(source_path.read_text(encoding="utf-8"))
     )
+    image_count = len(
+        re.findall(r"<img\b|!\[[^\]]*\]\([^)]+\)", original_markdown, re.IGNORECASE)
+    )
     source_html_path = _write_markdown_html(
         source_path, original_markdown, f"{source_path.stem} Markdown"
     )
@@ -879,7 +882,7 @@ def translate_markdown_file(
         html_path=source_html_path,
         translated_markdown_path=output_markdown_path,
         translated_html_path=translated_html_path,
-        stats=ConversionStats(page_count=0, image_count=0),
+        stats=ConversionStats(page_count=0, image_count=image_count),
         timings=TimingStats(
             conversion_seconds=0.0,
             translation_seconds=translation_seconds,

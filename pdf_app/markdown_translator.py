@@ -142,31 +142,52 @@ class ProtectedMarkdown:
 
 
 class RateLimiter:
-    def __init__(self, max_requests: int, period_seconds: float) -> None:
+    def __init__(
+        self,
+        max_requests: int,
+        period_seconds: float,
+        min_interval_seconds: float = 1.5,
+    ) -> None:
         self.max_requests = max_requests
         self.period_seconds = period_seconds
+        self.min_interval_seconds = min_interval_seconds
         self.request_times: deque[float] = deque()
+        self.last_success_time: float = 0.0
         self._lock = Lock()
+
+    def record_success(self) -> None:
+        with self._lock:
+            self.last_success_time = time.monotonic()
 
     def wait_for_slot(self, cancel_check: CancelCheck | None = None) -> None:
         while True:
             if cancel_check is not None and cancel_check():
                 raise TranslationCancelledError("Translation cancelled by user.")
+
             with self._lock:
                 now = time.monotonic()
-                while (
-                    self.request_times
-                    and now - self.request_times[0] >= self.period_seconds
-                ):
-                    self.request_times.popleft()
+                # 1. 成功后的冷却缓冲间隔 (Pacing delay / cooldown after success: 1.5s)
+                cooldown_remaining = 0.0
+                if self.last_success_time > 0 and self.min_interval_seconds > 0:
+                    cooldown_remaining = self.min_interval_seconds - (now - self.last_success_time)
 
-                if len(self.request_times) < self.max_requests:
-                    self.request_times.append(now)
-                    return
+                if cooldown_remaining > 0:
+                    wait_seconds = cooldown_remaining
+                else:
+                    # 2. 滑动窗口限流 (Sliding window RPM limit)
+                    while (
+                        self.request_times
+                        and now - self.request_times[0] >= self.period_seconds
+                    ):
+                        self.request_times.popleft()
 
-                wait_seconds = self.period_seconds - (now - self.request_times[0])
+                    if len(self.request_times) < self.max_requests:
+                        self.request_times.append(now)
+                        return
 
-            sleep_end = time.monotonic() + max(wait_seconds, 0.1)
+                    wait_seconds = self.period_seconds - (now - self.request_times[0])
+
+            sleep_end = time.monotonic() + max(wait_seconds, 0.05)
             while time.monotonic() < sleep_end:
                 if cancel_check is not None and cancel_check():
                     raise TranslationCancelledError("Translation cancelled by user.")
@@ -510,6 +531,7 @@ class NvidiaMarkdownTranslator:
                 continue
 
             if response.status_code == 200:
+                self.rate_limiter.record_success()
                 break
 
             if (

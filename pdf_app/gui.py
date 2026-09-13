@@ -977,12 +977,21 @@ class PdfToMarkdownApp:
         total_images = sum(
             item.result.stats.image_count for item in success_items if item.result
         )
+        all_markdown = (
+            all(
+                item.file_path.suffix.lower() in {".md", ".markdown", ".txt"}
+                for item in success_items
+            )
+            if success_items
+            else False
+        )
+        pages_summary_str = "N/A (Markdown)" if all_markdown else str(total_pages)
 
         self._append_log("\n================ BATCH SUMMARY ================")
         self._append_log(f"Total files: {total_count}")
         self._append_log(f"Successful: {success_count}")
         self._append_log(f"Failed: {failed_count}")
-        self._append_log(f"Total Pages: {total_pages}, Total Images: {total_images}")
+        self._append_log(f"Total Pages: {pages_summary_str}, Total Images: {total_images}")
         self._append_log(f"Total Elapsed Time: {batch_result.total_time_seconds:.2f}s")
         if self._is_cancelled:
             self._append_log("Status: Stopped by user.")
@@ -1020,6 +1029,9 @@ class PdfToMarkdownApp:
                 translated_label = res.translated_markdown_path or "Not generated"
                 translated_html_label = res.translated_html_path or "Not generated"
                 html_label = res.html_path or "Not generated"
+                is_md = item.file_path.suffix.lower() in {".md", ".markdown", ".txt"}
+                pages_label = "N/A (Markdown Mode)" if is_md else str(res.stats.page_count)
+                images_label = f"{res.stats.image_count} (in document)" if is_md else str(res.stats.image_count)
                 messagebox.showinfo(
                     "Completed",
                     (
@@ -1028,7 +1040,7 @@ class PdfToMarkdownApp:
                         f"HTML saved to:\n{html_label}\n\n"
                         f"Translated Markdown:\n{translated_label}\n\n"
                         f"Translated HTML:\n{translated_html_label}\n\n"
-                        f"Pages: {res.stats.page_count}\nImages: {res.stats.image_count}\n"
+                        f"Pages: {pages_label}\nImages: {images_label}\n"
                         f"Conversion time: {res.timings.conversion_seconds:.2f}s\n"
                         f"Translation time: {res.timings.translation_seconds:.2f}s\n"
                         f"Total time: {res.timings.total_seconds:.2f}s"
@@ -1050,7 +1062,7 @@ class PdfToMarkdownApp:
                 f"Total files: {total_count}",
                 f"Succeeded: {success_count}",
                 f"Failed: {failed_count}",
-                f"Total Pages: {total_pages} | Total Images: {total_images}\n",
+                f"Total Pages: {pages_summary_str} | Total Images: {total_images}\n",
             ]
             if self._is_cancelled:
                 summary_lines.insert(0, "[STOPPED BY USER]\n")
